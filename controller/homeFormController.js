@@ -3,108 +3,61 @@ const { mailSender } = require("../utils/mailSender");
 const mailTemplate = require("../templates/mailTemplate");
 const appendToSheet = require("../utils/googleSheet");
 const { parsePhoneNumber } = require("libphonenumber-js");
-const formatPhoneNumber = require("../controller/formatPhoneNumber");
-exports.homeFormHandler = async (req, res) => {
-  try {
-    //fetch details from body
-    const { userName, userEmail, referralCode, userPhone } = req.body;
-
-    //Basic Validation
-    if (!userName || !userEmail || !referralCode || !userPhone) {
-      return res.status(400).json({
-        success: false,
-        message: "All fields are mandatory !",
-      });
-    }
-
-    //Phone Number validation according to Country
-    const phoneData = formatPhoneNumber(userPhone);
-     if (!phoneData.valid) {
-       return res.status(400).json({
-         success: false,
-         message: "Enter number with Country Code(ex. for India +91)",
-         error: phoneData.error,
-       });
-     }
-
-
-
-    //check in DB if user entry is already created
-    const existingUser = await HomeSchema.findOne({ userEmail });
-    if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        message: "Entry with this email already exist",
-      });
-    }
-
-    //create an entry in database
-    const userInfo = await HomeSchema.create({
-      userName,
-      userEmail,
-      referralCode,
-      userPhone: phoneData.number,
-    });
-
-    //fetch details from backend
-    const user = await HomeSchema.findOne({ userEmail });
-    console.log("User details fetched from DB: ", user);
-
-    //Send an email
+const { formatPhoneNumber } = require("../controller/formatPhoneNumber");
+const dbEntryMiddleware = require("../middleware/dbEntryMiddleware");
+const mailSendMiddleware = require("../middleware/mailSendMiddleware");
+const sheetEntryMiddleware = require("../middleware/sheetEntryMiddleware");
+const Joi = require("joi");
+exports.homeFormHandler = [
+  async (req, res, next) => {
     try {
-      const mailResponse = await mailSender(
-        "New User entry in Database",
-        mailTemplate({
-          userName: user.userName,
-          userEmail: user.userEmail,
-          referralCode: user.referralCode,
-          userPhone: user.userPhone,
-          createdAt: user.createdAt,
-        })
-      );
+      const { userName, userEmail, referralCode, userPhone } = req.body;
+      // Joi schema validation
+      const schema = Joi.object({
+        userName: Joi.string().min(2).max(50).required(),
+        userEmail: Joi.string().email().required(),
+        referralCode: Joi.string().alphanum().min(3).max(20).required(),
+        userPhone: Joi.string().required(), // phone validated separately
+      });
+      const { error } = schema.validate({ userName, userEmail, referralCode, userPhone });
+      if (error) {
+        return res.status(400).json({
+          success: false,
+          message: error.details[0].message,
+        });
+      }
+      // Phone validation as before
+      const phoneData = formatPhoneNumber(userPhone);
+      if (!phoneData.valid) {
+        return res.status(400).json({
+          success: false,
+          message: "Enter number with Country Code(ex. for India +91)",
+          error: phoneData.error,
+        });
+      }
+      req.userData = {
+        userName,
+        userEmail,
+        referralCode,
+        userPhone: phoneData.number,
+      };
+      next();
     } catch (error) {
-      console.log("Eror while sending mail");
-      return res.status(400).json({
+      return res.status(500).json({
         success: false,
-        message: "Email not sent !",
+        message: "Validation failed!",
         error: error.message,
       });
     }
-
-    // Entry in Google sheet
-    try {
-      await appendToSheet([
-        user.userName,
-        user.userEmail,
-        user.userPhone,
-        user.referralCode,
-        user.createdAt.toLocaleString("en-IN", {
-          timeZone: "Asia/Kolkata",
-          dateStyle: "medium",
-          timeStyle: "short",
-        }),
-      ]);
-    } catch (error) {
-      console.log("Eror while entry in Google sheet");
-      return res.status(400).json({
-        success: false,
-        message: "Entry not created in google sheet",
-        error: error.message,
-      });
-    }
-
-    //Send Response
+  },
+  dbEntryMiddleware,
+  sheetEntryMiddleware,
+  mailSendMiddleware,
+  (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Entry created Successfuly !",
-      userInfo,
+      userInfo: req.userInfo,
     });
-  } catch (error) {
-    console.log("Error while saving the userInfo in DB! ");
-    return res.status(500).json({
-      success: false,
-      message: "Entry creation in DB failed!",
-      error: error.message,
-    });
-  }
-};
+  },
+];
